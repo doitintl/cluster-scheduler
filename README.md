@@ -6,10 +6,20 @@ The `cluster-scheduler` helps you to reduce cloud cost for managed Kubernetes cl
 
 ## Google Cloud
 
-### Required Permissions
+### Required Google IAM Permissions
 
-`container.clusters.update`
+```text
+    container.clusters.create
+    container.clusters.get
+    container.clusters.list
+    container.clusters.update
+    container.operations.get
+    container.operations.list
+    resourcemanager.projects.get
+    resourcemanager.projects.list
+```
 
+or predefined role `Kubernetes Engine Cluster Admin`
 
 ## Build Project
 

@@ -20,12 +20,6 @@ const (
 	default_OPERATION_CHECK   = time.Second * 15
 )
 
-type GkeCluster struct {
-	scheduler.Cluster
-	// labels fingerprint - required to update GKE cluster labels
-	Fingerprint string
-}
-
 type GkeScheduler struct {
 	project string
 	cm      *container.ClusterManagerClient
@@ -86,12 +80,12 @@ func (gke *GkeScheduler) List(ctx context.Context) ([]scheduler.Cluster, error) 
 		for _, np := range r.NodePools {
 			group := scheduler.NodeGroup{
 				Name:      np.Name,
-				NodeCount: int(np.InitialNodeCount),
+				NodeCount: np.InitialNodeCount,
 			}
 			if np.Autoscaling != nil {
 				group.Autoscaling = np.Autoscaling.Enabled
-				group.MinNodeCount = int(np.Autoscaling.MinNodeCount)
-				group.MaxNodeCount = int(np.Autoscaling.MaxNodeCount)
+				group.MinNodeCount = np.Autoscaling.MinNodeCount
+				group.MaxNodeCount = np.Autoscaling.MaxNodeCount
 			}
 			cluster.Nodes = append(cluster.Nodes, group)
 		}
@@ -106,7 +100,14 @@ func (gke *GkeScheduler) Stop(ctx context.Context, cluster scheduler.Cluster) er
 		"cluster":  cluster.Name,
 		"project":  cluster.Project,
 		"location": cluster.Location,
+		"status":   cluster.Status,
 	}).Info("stopping cluster")
+	// check cluster status
+	if cluster.Status == scheduler.STATUS_DOWN {
+		log.Debug("ignore stopped cluster")
+		return nil
+	}
+	// stop cluster
 	clusterName := fmt.Sprintf("projects/%s/locations/%s/clusters/%s",
 		cluster.Project, cluster.Location, cluster.Name)
 	// prepare node pool backup labels; create/update cluster labels
@@ -179,6 +180,86 @@ func (gke *GkeScheduler) Stop(ctx context.Context, cluster scheduler.Cluster) er
 }
 
 func (gke *GkeScheduler) Restart(ctx context.Context, cluster scheduler.Cluster) error {
+	log.WithFields(log.Fields{
+		"cluster":  cluster.Name,
+		"project":  cluster.Project,
+		"location": cluster.Location,
+		"status":   cluster.Status,
+	}).Info("restarting cluster")
+	// check cluster status
+	if cluster.Status == scheduler.STATUS_UP {
+		log.Debug("ignore already running cluster")
+		return nil
+	}
+	// restart cluster
+	clusterName := fmt.Sprintf("projects/%s/locations/%s/clusters/%s",
+		cluster.Project, cluster.Location, cluster.Name)
+	// update cluster node pools:
+	// 1. restore autoscaling
+	// 2. update nodepool size to min and max
+	for _, np := range cluster.Nodes {
+		nodePoolName := fmt.Sprintf("%s/nodePools/%s", clusterName, np.Name)
+		upNodePool, err := scheduler.Restore(
+			np.Name, cluster.Labels[scheduler.GetBackupLabel(np.Name)])
+		if err != nil {
+			return errors.Wrap(err, "failed to read backup from label")
+		}
+		// set node pool autoscaling to false
+		log.WithFields(log.Fields{
+			"cluster":   cluster.Name,
+			"node-pool": np.Name,
+		}).Debug("restoring nodepool autoscaling")
+		reqAutoscaling := &containerpb.SetNodePoolAutoscalingRequest{
+			Name: nodePoolName,
+			Autoscaling: &containerpb.NodePoolAutoscaling{
+				Enabled:      upNodePool.Autoscaling,
+				MinNodeCount: upNodePool.MinNodeCount,
+				MaxNodeCount: upNodePool.MaxNodeCount,
+			},
+		}
+		op, err := gke.cm.SetNodePoolAutoscaling(ctx, reqAutoscaling)
+		if err != nil {
+			return errors.Wrap(err, "failed to restore node pool autoscaling")
+		}
+		err = gke.waitForOperation(ctx, cluster.Project, cluster.Location, op)
+		if err != nil {
+			return errors.Wrap(err, "failed to complete 'SetNodePoolAutoscaling' operation")
+		}
+		// resize node pool size to 0
+		log.WithFields(log.Fields{
+			"cluster":   cluster.Name,
+			"node-pool": np.Name,
+		}).Debug("restoring nodepool size")
+		reqSize := &containerpb.SetNodePoolSizeRequest{
+			Name:      nodePoolName,
+			NodeCount: upNodePool.NodeCount,
+		}
+		op, err = gke.cm.SetNodePoolSize(ctx, reqSize)
+		if err != nil {
+			return errors.Wrap(err, "failed to restore node pool size")
+		}
+		err = gke.waitForOperation(ctx, cluster.Project, cluster.Location, op)
+		if err != nil {
+			return errors.Wrap(err, "failed to complete 'SetNodePoolSize' operation")
+		}
+	}
+	// update cluster scheduler status label
+	labels := cluster.Labels
+	labels[scheduler.STATUS_LABEL] = scheduler.STATUS_UP
+	reqStatusLabel := &containerpb.SetLabelsRequest{
+		Name:             clusterName,
+		ResourceLabels:   labels,
+		LabelFingerprint: cluster.Fingerprint,
+	}
+	log.Debug("updating cluster scheduler status")
+	op, err := gke.cm.SetLabels(ctx, reqStatusLabel)
+	if err != nil {
+		return errors.Wrap(err, "failed to update cluster scheduler status")
+	}
+	err = gke.waitForOperation(ctx, cluster.Project, cluster.Location, op)
+	if err != nil {
+		return errors.Wrap(err, "failed to complete 'SetLabels' operation")
+	}
 	return nil
 }
 
@@ -201,8 +282,9 @@ func (gke *GkeScheduler) waitForOperation(ctx context.Context, project, location
 	done := make(chan int)
 	errCh := make(chan error)
 	go func(project, location, name string) {
-		// periodically check operation status
-		for range time.Tick(default_OPERATION_CHECK) {
+		// periodically check operation status (first tick after 10ms)
+		ticker := time.NewTicker(default_OPERATION_CHECK)
+		for ; true; <-ticker.C {
 			opReq := &containerpb.GetOperationRequest{
 				Name: fmt.Sprintf("projects/%s/locations/%s/operations/%s", project, location, name),
 			}
@@ -214,6 +296,7 @@ func (gke *GkeScheduler) waitForOperation(ctx context.Context, project, location
 			}
 			if op.Status == containerpb.Operation_DONE {
 				done <- 1
+				ticker.Stop()
 				break
 			}
 		}

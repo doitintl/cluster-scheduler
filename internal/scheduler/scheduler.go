@@ -14,9 +14,9 @@ const (
 
 type NodeGroup struct {
 	Name         string
-	NodeCount    int
-	MinNodeCount int
-	MaxNodeCount int
+	NodeCount    int32
+	MinNodeCount int32
+	MaxNodeCount int32
 	Autoscaling  bool
 }
 

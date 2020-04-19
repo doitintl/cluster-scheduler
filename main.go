@@ -3,11 +3,13 @@ package main
 import (
 	"context"
 	"fmt"
+	"github.com/doitintl/cluster-scheduler/internal/scheduler"
 	"os"
 	"os/signal"
 	"runtime"
 	"syscall"
 
+	"github.com/doitintl/cluster-scheduler/internal/scheduler/aws"
 	"github.com/doitintl/cluster-scheduler/internal/scheduler/gke"
 	"github.com/pkg/errors"
 	"github.com/urfave/cli/v2"
@@ -18,6 +20,8 @@ import (
 var (
 	// main context
 	mainCtx context.Context
+	// cluster scheduler runner
+	runner scheduler.Runner
 	// Version contains the current version.
 	Version = "dev"
 	// BuildDate contains a string with the build date.
@@ -26,68 +30,73 @@ var (
 	GitCommit = "dirty"
 	// GitBranch git branch
 	GitBranch = "master"
-
-	// internal
-	logger *log.Logger
 )
 
 func init() {
-	logger = log.New()
 	// set log level
-	logger.SetLevel(log.WarnLevel)
-	logger.SetFormatter(&log.TextFormatter{})
+	log.SetLevel(log.WarnLevel)
+	log.SetFormatter(&log.TextFormatter{})
 }
 
 func before(c *cli.Context) error {
 	// set debug log level
 	switch level := c.String("log-level"); level {
 	case "debug", "DEBUG":
-		logger.SetLevel(log.DebugLevel)
+		log.SetLevel(log.DebugLevel)
 	case "info", "INFO":
-		logger.SetLevel(log.InfoLevel)
+		log.SetLevel(log.InfoLevel)
 	case "warning", "WARNING":
-		logger.SetLevel(log.WarnLevel)
+		log.SetLevel(log.WarnLevel)
 	case "error", "ERROR":
-		logger.SetLevel(log.ErrorLevel)
+		log.SetLevel(log.ErrorLevel)
 	case "fatal", "FATAL":
-		logger.SetLevel(log.FatalLevel)
+		log.SetLevel(log.FatalLevel)
 	case "panic", "PANIC":
-		logger.SetLevel(log.PanicLevel)
+		log.SetLevel(log.PanicLevel)
 	default:
-		logger.SetLevel(log.WarnLevel)
+		log.SetLevel(log.WarnLevel)
 	}
 	// set log formatter to JSON
 	if c.Bool("json") {
-		logger.SetFormatter(&log.JSONFormatter{})
+		log.SetFormatter(&log.JSONFormatter{})
 	}
-	return nil
+	// set default scheduler runner
+	var err error
+	switch cluster := c.String("cluster"); cluster {
+	case "gke":
+		runner, err = gke.NewGkeScheduler(mainCtx)
+	case "eks":
+		runner, err = aws.NewEksScheduler(mainCtx)
+	default:
+		runner, err = gke.NewGkeScheduler(mainCtx)
+	}
+
+	return err
 }
 
 func listCmd(c *cli.Context) error {
 	log.Debug("list clusters")
-	runner, _ := gke.NewGkeScheduler(mainCtx)
 	clusters, err := runner.List(mainCtx)
 	if err != nil {
-		return errors.Wrap(err, "failed list command")
+		return errors.Wrap(err, "failed list clusters")
 	}
 	for _, c := range clusters {
 		//log.WithFields()
-		runner.DecideOnStatus(c)
+		err := runner.DecideOnStatus(c)
+		if err != nil {
+			return errors.Wrap(err, "failed to decide on next cluster status")
+		}
 	}
 	return nil
 }
 
 func stopCmd(c *cli.Context) error {
-	runner, _ := gke.NewGkeScheduler(mainCtx)
 	clusters, err := runner.List(mainCtx)
 	if err != nil {
-		return errors.Wrap(err, "failed list command")
+		return errors.Wrap(err, "failed list clusters")
 	}
+	log.Debug("stopping clusters")
 	for _, c := range clusters {
-		log.WithFields(log.Fields{
-			"cluster": c.Name,
-			"project": c.Project,
-		}).Info("stopping cluster")
 		err := runner.Stop(mainCtx, c)
 		if err != nil {
 			return errors.Wrap(err, "failed to stop cluster")
@@ -97,6 +106,17 @@ func stopCmd(c *cli.Context) error {
 }
 
 func restartCmd(c *cli.Context) error {
+	clusters, err := runner.List(mainCtx)
+	if err != nil {
+		return errors.Wrap(err, "failed list clusters")
+	}
+	log.Debug("restarting clusters")
+	for _, c := range clusters {
+		err := runner.Restart(mainCtx, c)
+		if err != nil {
+			return errors.Wrap(err, "failed to restart cluster")
+		}
+	}
 	return nil
 }
 
@@ -154,6 +174,12 @@ func main() {
 				Name:  "log-level",
 				Usage: "set log level (debug, info, warning(*), error, fatal, panic)",
 				Value: "warning",
+			},
+			&cli.StringFlag{
+				Name:    "cluster",
+				Aliases: nil,
+				Usage:   "specify cluster type (eks, gke)",
+				Value:   "gke",
 			},
 		},
 		Name:    "cluster-scheduler",
