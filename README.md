@@ -2,21 +2,30 @@
 
 # cluster-scheduler
 
-The `cluster-scheduler` is a bootstrap project for Go CLI application.
+The `cluster-scheduler` helps you to reduce cloud cost for managed Kubernetes clusters (GKE and EKS), by stopping and restarting Kubernetes clusters on schedule.
 
-## Docker
+## Google Cloud
+
+### Required Permissions
+
+`container.clusters.update`
+
+
+## Build Project
+
+### Docker
 
 The `cluster-scheduler` uses Docker both as a CI tool and for releasing final `cluster-scheduler` Docker image (`scratch` with updated `ca-credentials` package).
 
-## Makefile
+### Makefile
 
 The `cluster-scheduler` `Makefile` is used for task automation only: compile, lint, test and etc.
 
-## Continuous Integration
+### Continuous Integration
 
 GitHub action `Docker CI` is used for `cluster-scheduler` CI.
 
-### Required GitHub secrets
+#### Required GitHub secrets
 
 Please specify the following GitHub secrets:
 
